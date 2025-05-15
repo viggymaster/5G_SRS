@@ -2,12 +2,9 @@ import openpyxl
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import struct
-from scipy import signal
 from typing import Dict, Any, Tuple, List, Optional, Union
 import warnings
 warnings.filterwarnings('ignore')
-import dash
-import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
 import json
@@ -15,6 +12,8 @@ import traceback
 import os
 from primePy import primes
 from scipy import signal as sig
+from scipy.io import savemat
+import math
 
 class SRS_Generator:
     """
@@ -73,28 +72,233 @@ class SRS_Generator:
 
 
     def _validate_params(self):
-        """Validate SRS parameters"""
+        """
+        Validate and adjust SRS parameters with regressive checking approach
+
+        This function performs comprehensive validation in multiple phases:
+        1. Critical validation - prevents crashes
+        2. Specification compliance - ensures 3GPP conformance
+        3. Parameter relationship validation - maintains consistency
+        4. Performance optimization checks - ensures efficient operation
+
+        When possible, parameters are adjusted rather than rejected outright.
+        All adjustments and warnings are tracked and reported.
+        """
         p = self.params
 
-        # Basic validation
-        assert 1000 <= p['p_tx_port'] <= 1011, "p_tx_port must be between 1000 and 1011"
-        assert 0 <= p['c_srs'] <= 63, "c_srs must be between 0 and 63"
-        assert 0 <= p['b_srs'] <= 3, "b_srs must be between 0 and 3"
-        assert p['comb'] in [2, 4], "comb must be 2 or 4"
-        assert 0 <= p['comb_offset'] < p['comb'], f"comb_offset must be between 0 and {p['comb']-1}"
-        assert 0 <= p['b_hop'] <= 3, "b_hop must be between 0 and 3"
-        assert 0 <= p['n_rrc'] <= 23, "n_rrc must be between 0 and 23"
-        assert 0 <= p['n_id'] <= 1023, "n_id must be between 0 and 1023"
-        assert 0 <= p['hop_mod'] <= 2, "hop_mod must be between 0 and 2"
-        assert 0 <= p['mu'] <= 3, "mu must be between 0 and 3"
-        assert p['cp_type'] in ['normal', 'extended'], "cp_type must be 'normal' or 'extended'"
+        # Store original parameters and initialize tracking
+        original_params = p.copy()
+        validation_warnings = []
+        param_adjustments = {}
 
-        # Validate SRS configuration based on tables
-        c_srs = p['c_srs']
-        b_srs = p['b_srs']
+        try:
+            # ======== CRITICAL PARAMETER VALIDATION ========
+            # Check existence of mandatory parameters
+            mandatory_params = ['prb_num', 'comb', 'c_srs', 'b_srs']
+            for param in mandatory_params:
+                assert param in p, f"Missing mandatory parameter: {param}"
 
-        # Ensure the combination is valid (table may not have all b_srs values for every c_srs)
-        assert b_srs < len(self.m_srs_table[c_srs]), f"b_srs={b_srs} invalid for c_srs={c_srs}. Max b_srs is {len(self.m_srs_table[c_srs])-1}"
+            # Type checking for critical parameters
+            assert isinstance(p['prb_num'], int), "prb_num must be an integer"
+            assert isinstance(p['comb'], int), "comb must be an integer"
+            assert isinstance(p['c_srs'], int), "c_srs must be an integer"
+            assert isinstance(p['b_srs'], int), "b_srs must be an integer"
+
+            # Basic range checking for core parameters
+            assert p['prb_num'] > 0, "prb_num must be positive"
+            assert p['comb'] in [2, 4], "comb must be 2 or 4"
+            assert 0 <= p['c_srs'] <= 63, "c_srs must be between 0 and 63"
+            assert 0 <= p['b_srs'] <= 3, "b_srs must be between 0 and 3"
+
+            # ======== SPECIFICATION COMPLIANCE ========
+            # Check port range (3GPP compliant)
+            if not (1000 <= p['p_tx_port'] <= 1011):
+                old_val = p['p_tx_port']
+                p['p_tx_port'] = max(1000, min(1011, p['p_tx_port']))
+                param_adjustments['p_tx_port'] = (old_val, p['p_tx_port'])
+
+            # Check comb_offset range
+            if not (0 <= p['comb_offset'] < p['comb']):
+                old_val = p['comb_offset']
+                p['comb_offset'] = p['comb_offset'] % p['comb']
+                param_adjustments['comb_offset'] = (old_val, p['comb_offset'])
+
+            # Check b_hop range
+            if not (0 <= p['b_hop'] <= 3):
+                old_val = p['b_hop']
+                p['b_hop'] = max(0, min(3, p['b_hop']))
+                param_adjustments['b_hop'] = (old_val, p['b_hop'])
+
+            # Check n_rrc range
+            if not (0 <= p['n_rrc'] <= 23):
+                old_val = p['n_rrc']
+                p['n_rrc'] = max(0, min(23, p['n_rrc']))
+                param_adjustments['n_rrc'] = (old_val, p['n_rrc'])
+
+            # Check n_id range
+            if not (0 <= p['n_id'] <= 1023):
+                old_val = p['n_id']
+                p['n_id'] = p['n_id'] % 1024  # Wrap around
+                param_adjustments['n_id'] = (old_val, p['n_id'])
+
+            # Check hop_mod range
+            if not (0 <= p['hop_mod'] <= 2):
+                old_val = p['hop_mod']
+                p['hop_mod'] = max(0, min(2, p['hop_mod']))
+                param_adjustments['hop_mod'] = (old_val, p['hop_mod'])
+
+            # Check numerology
+            if not (0 <= p['mu'] <= 3):
+                old_val = p['mu']
+                p['mu'] = max(0, min(3, p['mu']))
+                param_adjustments['mu'] = (old_val, p['mu'])
+                validation_warnings.append(f"Numerology adjusted to {p['mu']}")
+
+            # Check CP type
+            if p['cp_type'] not in ['normal', 'extended']:
+                old_val = p['cp_type']
+                p['cp_type'] = 'normal'  # Default to normal CP
+                param_adjustments['cp_type'] = (old_val, p['cp_type'])
+                validation_warnings.append(f"CP type defaulted to 'normal'")
+
+            # Check if extended CP is used with mu>0 (not allowed)
+            if p['cp_type'] == 'extended' and p['mu'] > 0:
+                old_val = p['cp_type']
+                p['cp_type'] = 'normal'
+                param_adjustments['cp_type'] = (old_val, p['cp_type'])
+                validation_warnings.append("Extended CP not allowed with numerology > 0, defaulted to normal CP")
+
+            # ======== PARAMETER RELATIONSHIP VALIDATION ========
+            # Validate SRS configuration based on tables
+            c_srs = p['c_srs']
+            b_srs = p['b_srs']
+
+            # Check if the c_srs exists in the table
+            if c_srs >= len(self.m_srs_table):
+                old_val = c_srs
+                c_srs = min(c_srs, len(self.m_srs_table) - 1)
+                p['c_srs'] = c_srs
+                param_adjustments['c_srs'] = (old_val, c_srs)
+                validation_warnings.append(f"c_srs adjusted to {c_srs} to match available configurations")
+
+            # Check if b_srs is valid for the given c_srs
+            if b_srs >= len(self.m_srs_table[c_srs]):
+                old_val = b_srs
+                b_srs = len(self.m_srs_table[c_srs]) - 1
+                p['b_srs'] = b_srs
+                param_adjustments['b_srs'] = (old_val, b_srs)
+                validation_warnings.append(f"b_srs adjusted to {b_srs} for c_srs={c_srs}")
+
+            # Validate T_srs (periodicity) and T_offset relationship
+            if 'T_srs' not in p or p['T_srs'] <= 0:
+                old_val = p.get('T_srs', 0)
+                p['T_srs'] = 1  # Default to 1 slot
+                param_adjustments['T_srs'] = (old_val, p['T_srs'])
+
+            if 'T_offset' not in p or p['T_offset'] < 0:
+                old_val = p.get('T_offset', -1)
+                p['T_offset'] = 0
+                param_adjustments['T_offset'] = (old_val, p['T_offset'])
+
+            # Ensure T_offset < T_srs
+            if p['T_offset'] >= p['T_srs']:
+                old_val = p['T_offset']
+                p['T_offset'] = p['T_offset'] % p['T_srs']
+                param_adjustments['T_offset'] = (old_val, p['T_offset'])
+                validation_warnings.append(f"T_offset adjusted to {p['T_offset']} to be less than T_srs={p['T_srs']}")
+
+            # Validate symbol offset
+            symbols_per_slot = 14 if p['cp_type'] == 'normal' else 12
+            if not (0 <= p['sym_offset'] < symbols_per_slot):
+                old_val = p['sym_offset']
+                p['sym_offset'] = p['sym_offset'] % symbols_per_slot
+                param_adjustments['sym_offset'] = (old_val, p['sym_offset'])
+
+            # Validate n_syms fits within the slot
+            if p['sym_offset'] + p['n_syms'] > symbols_per_slot:
+                old_val = p['n_syms']
+                p['n_syms'] = symbols_per_slot - p['sym_offset']
+                param_adjustments['n_syms'] = (old_val, p['n_syms'])
+                validation_warnings.append(f"n_syms adjusted to {p['n_syms']} to fit within slot")
+
+            # Validate hopping configuration
+            if p['hop_mod'] > 0 and p['b_hop'] > p['b_srs']:
+                old_val = p['b_hop']
+                p['b_hop'] = p['b_srs']
+                param_adjustments['b_hop'] = (old_val, p['b_hop'])
+                validation_warnings.append(f"b_hop adjusted to {p['b_hop']} to be <= b_srs")
+
+            # Validate number of ports
+            if p['n_ports'] > 1 and (p['p_tx_port'] + p['n_ports'] - 1) > 1011:
+                old_val = p['n_ports']
+                p['n_ports'] = 1011 - p['p_tx_port'] + 1
+                param_adjustments['n_ports'] = (old_val, p['n_ports'])
+                validation_warnings.append(f"n_ports adjusted to {p['n_ports']} to fit within valid port range")
+
+            # ======== PERFORMANCE OPTIMIZATION VALIDATION ========
+            # Validate FFT size is sufficient for PRB configuration
+            min_fft_size = 2**(math.ceil(math.log2(p['prb_num'] * 12)))
+            if p['fft_size'] < min_fft_size:
+                old_val = p['fft_size']
+                p['fft_size'] = min_fft_size
+                param_adjustments['fft_size'] = (old_val, p['fft_size'])
+                validation_warnings.append(f"fft_size increased to {p['fft_size']} to accommodate {p['prb_num']} PRBs")
+
+            # Validate BWP configuration
+            # Helper function inline
+            max_prbs_table = {
+                0: 275,  # 15 kHz
+                1: 275,  # 30 kHz
+                2: 275,  # 60 kHz
+                3: 138   # 120 kHz
+            }
+            max_prbs = max_prbs_table.get(p['mu'], 275)  # Default to 275 if unknown
+
+            if p['bwp_offset'] + p['prb_num'] > max_prbs:
+                # Try to adjust bwp_offset first
+                if p['prb_num'] <= max_prbs:
+                    old_val = p['bwp_offset']
+                    p['bwp_offset'] = max(0, max_prbs - p['prb_num'])
+                    param_adjustments['bwp_offset'] = (old_val, p['bwp_offset'])
+                    validation_warnings.append(f"bwp_offset adjusted to {p['bwp_offset']} to fit within carrier bandwidth")
+                else:
+                    # If PRBs are too many, adjust them
+                    old_val = p['prb_num']
+                    p['prb_num'] = max_prbs
+                    param_adjustments['prb_num'] = (old_val, p['prb_num'])
+                    validation_warnings.append(f"prb_num adjusted to {p['prb_num']} to fit within carrier bandwidth")
+
+            # Check n_slots is reasonable
+            if 'n_slots' not in p or p['n_slots'] <= 0:
+                old_val = p.get('n_slots', 0)
+                p['n_slots'] = 10  # Default to 10 slots
+                param_adjustments['n_slots'] = (old_val, p['n_slots'])
+            elif p['n_slots'] > 1000:
+                validation_warnings.append(f"Large n_slots value ({p['n_slots']}) may impact performance")
+
+            # ======== REPORT VALIDATION RESULTS ========
+            # Store validation results
+            self.validation_warnings = validation_warnings
+            self.param_adjustments = param_adjustments
+
+            # Log changes if any parameters were adjusted
+            if param_adjustments:
+                print("WARNING: The following parameters were adjusted:")
+                for param, (old_val, new_val) in param_adjustments.items():
+                    print(f"  - {param}: {old_val} → {new_val}")
+
+            # Log warnings if any
+            if validation_warnings:
+                print("VALIDATION WARNINGS:")
+                for warning in validation_warnings:
+                    print(f"  - {warning}")
+
+            return True
+
+        except AssertionError as e:
+            # Restore original parameters to ensure consistent state
+            self.params = original_params
+            raise ValueError(f"Parameter validation failed: {str(e)}")
 
     def _init_tables(self):
       """Initialize tables from 3GPP TS 38.211"""
@@ -364,8 +568,7 @@ class SRS_Generator:
                     srs_seq = self._generate_low_papr_sequence(u, v, alpha, seq_length)
                 else:
                     srs_seq = self._generate_ZC_sequence(u, v, alpha, seq_length)
-
-                pd.DataFrame({'real': srs_seq.real, 'imag': srs_seq.imag}).to_excel("srs_seq.xlsx", index=False)
+                pd.DataFrame({'real': srs_seq.real.flatten(), 'imag': srs_seq.imag.flatten()}).to_excel("srs_seq.xlsx", index=False)
 
                 # Map sequence to RE grid using comb pattern
                 seq_idx = 0
@@ -1015,6 +1218,9 @@ class SRS_Generator:
 
         if metadata is None:
             metadata = {}
+
+        # Export dat in matlab format
+        savemat('td_signal.mat', {'array_name': data})
 
         # Scale signal and split into real (I) and imaginary (Q) parts
         i_samples = np.real(data) * scale
@@ -1852,7 +2058,7 @@ def generate_srs_example():
         'comb_cs': 0,          # Cyclic shift (alternative naming)
 
         # Additional required parameters
-        'n_syms': 4,           # Number of symbols
+        'n_syms': 2,           # Number of symbols
         'n_ports': 1,          # Number of ports
         'fd_shift': 0,         # Frequency domain shift
         'bwp_offset': 0,       # BWP offset
@@ -1860,7 +2066,7 @@ def generate_srs_example():
         # Signal processing parameters
         'cp_type': 'normal',   # Cyclic prefix type
         'mu': 0,               # 15kHz subcarrier spacing
-        'fft_size': 1024,      # FFT size
+        'fft_size': 512,      # FFT size
 
         # Signal Generation
         "periodicity": 1,      # SRS periodicity in slots
@@ -1870,7 +2076,7 @@ def generate_srs_example():
         "T_offset":0,          # SRS offset (Alternate Name)
         "slot_offset":0,       # SRS offset
 
-        'n_slots': 1,          # Total Slots to generate
+        'n_slots': 10,          # Total Slots to generate
 
         # Analysis parameters
         'snr_prb_en': True,    # Enable SNR per PRB estimation
@@ -1922,4 +2128,3 @@ if __name__ == "__main__":
     generate_srs_example()
     pass
 
- 
