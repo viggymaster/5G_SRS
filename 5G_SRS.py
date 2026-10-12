@@ -1,19 +1,40 @@
-import openpyxl
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import struct
 from typing import Dict, Any, Tuple, List, Optional, Union
 import warnings
 warnings.filterwarnings('ignore')
 import numpy as np
-import pandas as pd
 import json
 import traceback
 import os
-from primePy import primes
-from scipy import signal as sig
-from scipy.io import savemat
 import math
+
+# Plotting and spreadsheet export are optional; signal generation must not
+# fail merely because those convenience packages are not installed.
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except ImportError:
+    go = None
+    make_subplots = None
+
+
+def _largest_prime_at_most(value: int) -> int:
+    """Return the largest prime <= value without requiring primePy."""
+    value = int(value)
+    if value < 2:
+        raise ValueError("sequence length must be at least 2")
+    for candidate in range(value, 1, -1):
+        if all(candidate % divisor for divisor in range(2, math.isqrt(candidate) + 1)):
+            return candidate
+    raise ValueError("no prime found")
 
 class SRS_Generator:
     """
@@ -568,8 +589,6 @@ class SRS_Generator:
                     srs_seq = self._generate_low_papr_sequence(u, v, alpha, seq_length)
                 else:
                     srs_seq = self._generate_ZC_sequence(u, v, alpha, seq_length)
-                pd.DataFrame({'real': srs_seq.real.flatten(), 'imag': srs_seq.imag.flatten()}).to_excel("srs_seq.xlsx", index=False)
-
                 # Map sequence to RE grid using comb pattern
                 seq_idx = 0
                 mapped_positions = []
@@ -896,8 +915,7 @@ class SRS_Generator:
             r_seq: Low PAPR sequence
         """
         # Find largest prime smaller than m_zc
-        prime_list = list(primes.upto(m_zc))
-        n_zc = prime_list[-1] if prime_list else 1
+        n_zc = _largest_prime_at_most(m_zc)
 
         # Determine q and q_bar
         q_bar = n_zc * (u + 1) / 31
@@ -1219,14 +1237,9 @@ class SRS_Generator:
         if metadata is None:
             metadata = {}
 
-        # Export dat in matlab format
-        savemat('td_signal.mat', {'array_name': data})
-
         # Scale signal and split into real (I) and imaginary (Q) parts
         i_samples = np.real(data) * scale
         q_samples = np.imag(data) * scale
-
-        pd.DataFrame({'Real':i_samples, 'Imaginary': q_samples}).to_excel("td_signal.xlsx", index=False)
 
         # Interleave I and Q samples
         iq_samples = np.zeros(2 * len(data), dtype=np.float32)
@@ -1297,6 +1310,11 @@ class SRS_Generator:
         Returns:
             True if export succeeds, otherwise raises an error.
         """
+        if pd is None or openpyxl is None:
+            raise RuntimeError(
+                "Excel export requires pandas and openpyxl; "
+                "install them to use export_resource_grid_to_excel"
+            )
         try:
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(os.path.abspath(excel_path)), exist_ok=True)
@@ -1802,6 +1820,11 @@ def plot_srs_results(re_grid, td_signal, measurements, num_slots=None):
         measurements (dict): Analysis results (e.g., SNR, timing).
         num_slots (int, optional): Number of slots. Defaults to automatic detection from numerology.
     """
+    if go is None or make_subplots is None:
+        raise RuntimeError(
+            "Plotting requires plotly; install it to use plot_srs_results"
+        )
+
     # Auto-detect numerology and slots if not specified
     if num_slots is None:
         signal_len = len(td_signal)
@@ -1974,8 +1997,17 @@ def plot_srs_results(re_grid, td_signal, measurements, num_slots=None):
     # 4. Frequency Spectrum Plot
     print("Generating frequency spectrum visualization...")
 
-    # Use Welch's method for better spectrum estimation
-    f, Pxx = sig.welch(td_signal, fs=len(td_signal)/10e-3, nperseg=1024, scaling='spectrum')
+    # Use Welch's method when scipy is available, otherwise use a plain FFT.
+    try:
+        from scipy import signal as sig
+        f, Pxx = sig.welch(
+            td_signal, fs=len(td_signal) / 10e-3,
+            nperseg=min(1024, len(td_signal)), scaling='spectrum'
+        )
+    except ImportError:
+        sample_rate = len(td_signal) / 10e-3
+        f = np.fft.fftfreq(len(td_signal), d=1 / sample_rate)
+        Pxx = np.abs(np.fft.fft(td_signal)) ** 2 / max(len(td_signal), 1)
 
     # Shift to center frequency
     f = np.fft.fftshift(f)
@@ -2092,7 +2124,8 @@ def generate_srs_example():
 
     # Export to binary file
     srs_gen.export_binary(td_signal, "srs_buffer.bin", scale=2**14, endian='big', metadata=srs_info)
-    srs_gen.export_resource_grid_to_excel(re_grid, "grid_in.xlsx", scale_factor=2**14)
+    if pd is not None and openpyxl is not None:
+        srs_gen.export_resource_grid_to_excel(re_grid, "grid_in.xlsx", scale_factor=2**14)
 
     # Create analyzer with same parameters
     srs_analyzer = SRS_Analyzer(params)
@@ -2118,8 +2151,9 @@ def generate_srs_example():
     else:
         print("Timing alignment: Not available")
 
-    # Plot results if plotting function is available
-    plot_srs_results(re_grid, td_signal, measurements, params['n_slots'])
+    # Plot results when the optional plotting dependency is installed.
+    if go is not None and make_subplots is not None:
+        plot_srs_results(re_grid, td_signal, measurements, params['n_slots'])
 
 if __name__ == "__main__":
     # For standalone execution, uncomment one of these:

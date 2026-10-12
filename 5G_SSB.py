@@ -856,7 +856,7 @@ class SSBAnalyzer:
         
         return scaled_signal, shift
     
-    def decimate_signal(self, signal: np.ndarray) -> np.ndarray:
+    def decimate_signal(self, samples: np.ndarray) -> np.ndarray:
         """
         Decimate signal by decimation_ratio
         
@@ -866,18 +866,28 @@ class SSBAnalyzer:
         Returns:
             Decimated signal
         """
+        samples = np.asarray(samples)
+        if samples.ndim != 1:
+            raise ValueError("signal must be a one-dimensional array")
+        if samples.size == 0:
+            return samples.copy()
+
         # Determine decimation ratio based on numerology
         if self.params.numerology == Numerology.MU0:
             decimation_ratio = 8  # For 15 kHz SCS <sup data-citation="33"><a href="https://ytd2525.wordpress.com/2019/12/15/5g-nr-cyclic-prefix-cp-design/#:~:text=Cyclic%20prefix%20(CP)%20refers,spacing%20coincide%20with" target="_blank" title="ytd2525.wordpress.com">33</a></sup>
         else:
             decimation_ratio = 4  # For 30 kHz SCS
         
-        # Apply filter and decimate
-        # Using scipy for simplicity - in a real implementation, you'd use
-        # more efficient methods for fixed-point compatibility
-        decimated = signal.decimate(signal, decimation_ratio, ftype='fir')
-        
-        return decimated
+        # Keep the analyzer dependency-free.  A short windowed-sinc low-pass
+        # filter prevents strong aliases before downsampling.
+        cutoff = 0.5 / decimation_ratio
+        taps = 8 * decimation_ratio + 1
+        n = np.arange(taps) - taps // 2
+        kernel = 2 * cutoff * np.sinc(2 * cutoff * n)
+        kernel *= np.hamming(taps)
+        kernel /= np.sum(kernel)
+        filtered = np.convolve(samples, kernel, mode="same")
+        return filtered[::decimation_ratio]
     
     def detect_pss(self, signal: np.ndarray) -> Tuple[int, float, int]:
         """
